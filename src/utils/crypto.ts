@@ -27,6 +27,13 @@ export interface DecryptionResult {
   objectUrl: string;
 }
 
+export interface PasswordStrength {
+  score: 'weak' | 'medium' | 'strong' | 'very-strong';
+  label: string;
+  percentage: number;
+  feedback?: string;
+}
+
 const MAGIC_BYTES = new Uint8Array([0x45, 0x56, 0x43, 0x31]); // "EVC1"
 const SALT_SIZE = 16;
 const IV_SIZE = 12;
@@ -44,7 +51,9 @@ export async function deriveKey(password: string, salt: Uint8Array): Promise<Cry
     ? salt
     : salt.slice();
 
-  const keyMaterial = await window.crypto.subtle.importKey(
+  const cryptoObj = (typeof window !== 'undefined' && window.crypto) || globalThis.crypto;
+
+  const keyMaterial = await cryptoObj.subtle.importKey(
     "raw",
     passwordBytes,
     { name: "PBKDF2" },
@@ -52,7 +61,7 @@ export async function deriveKey(password: string, salt: Uint8Array): Promise<Cry
     ["deriveKey"]
   );
 
-  return window.crypto.subtle.deriveKey(
+  return cryptoObj.subtle.deriveKey(
     {
       name: "PBKDF2",
       salt: cleanSalt.buffer as ArrayBuffer,
@@ -77,15 +86,17 @@ export async function encryptImage(
   onProgress?.("Preparing image...");
   const imageArrayBuffer = await file.arrayBuffer();
 
+  const cryptoObj = (typeof window !== 'undefined' && window.crypto) || globalThis.crypto;
+
   onProgress?.("Generating secure key...");
   // Cryptographically random salt and IV
-  const salt = window.crypto.getRandomValues(new Uint8Array(SALT_SIZE));
-  const iv = window.crypto.getRandomValues(new Uint8Array(IV_SIZE));
+  const salt = cryptoObj.getRandomValues(new Uint8Array(SALT_SIZE));
+  const iv = cryptoObj.getRandomValues(new Uint8Array(IV_SIZE));
 
   const key = await deriveKey(password, salt);
 
   onProgress?.("Encrypting image...");
-  const ciphertextBuffer = await window.crypto.subtle.encrypt(
+  const ciphertextBuffer = await cryptoObj.subtle.encrypt(
     {
       name: "AES-GCM",
       iv: iv.buffer as ArrayBuffer,
@@ -241,10 +252,12 @@ export async function decryptEVC(
 
   const ciphertext = uint8View.slice(offset);
 
+  const cryptoObj = (typeof window !== 'undefined' && window.crypto) || globalThis.crypto;
+
   try {
     const key = await deriveKey(password, salt);
 
-    const decryptedArrayBuffer = await window.crypto.subtle.decrypt(
+    const decryptedArrayBuffer = await cryptoObj.subtle.decrypt(
       {
         name: "AES-GCM",
         iv: iv.buffer as ArrayBuffer,
@@ -272,34 +285,213 @@ export async function decryptEVC(
 }
 
 /**
- * Calculates password strength metrics.
+ * Common passwords and dictionary patterns to guard against predictable keys.
  */
-export function getPasswordStrength(password: string): {
-  score: 'weak' | 'medium' | 'strong';
-  label: string;
-  percentage: number;
-} {
+const COMMON_PASSWORDS = new Set([
+  'password', 'password1', 'password123', 'pass1234', '12345678', '123456789',
+  '1234567890', '123456', '12345', 'qwerty', 'qwertyuiop', 'qwerty123',
+  'admin', 'admin123', 'administrator', 'welcome', 'welcome1', 'welcome123',
+  'letmein', 'letmein123', 'iloveyou', 'iloveyou1', 'secret', 'secret123',
+  'monkey', 'monkey123', 'dragon', 'dragon123', 'master', 'master123',
+  'football', 'baseball', 'default', 'default123', 'trustno1', 'changeme'
+]);
+
+/**
+ * Checks for repeated sequential character patterns (e.g., "1234", "abcd", "dcba").
+ */
+function hasSequentialPattern(str: string, minLength: number = 4): boolean {
+  const lower = str.toLowerCase();
+  let forwardCount = 1;
+  let backwardCount = 1;
+  for (let i = 1; i < lower.length; i++) {
+    const diff = lower.charCodeAt(i) - lower.charCodeAt(i - 1);
+    if (diff === 1) {
+      forwardCount++;
+      if (forwardCount >= minLength) return true;
+    } else {
+      forwardCount = 1;
+    }
+    if (diff === -1) {
+      backwardCount++;
+      if (backwardCount >= minLength) return true;
+    } else {
+      backwardCount = 1;
+    }
+  }
+  return false;
+}
+
+/**
+ * Calculates password strength metrics across 4 levels: Weak, Medium, Strong, Very Strong.
+ * Evaluates length, character variety, common password presence, and sequential/repetitive patterns.
+ */
+export function getPasswordStrength(password: string): PasswordStrength {
   if (!password) {
     return { score: 'weak', label: 'Empty', percentage: 0 };
   }
-  if (password.length < 8) {
-    return { score: 'weak', label: 'Weak (min 8 chars)', percentage: 25 };
+
+  const length = password.length;
+  if (length < 8) {
+    return {
+      score: 'weak',
+      label: 'Weak',
+      percentage: 25,
+      feedback: 'Password must be at least 8 characters long.'
+    };
   }
 
-  let score = 0;
-  if (password.length >= 8) score += 1;
-  if (password.length >= 12) score += 1;
-  if (/[A-Z]/.test(password)) score += 1;
-  if (/[0-9]/.test(password)) score += 1;
-  if (/[^A-Za-z0-9]/.test(password)) score += 1;
+  const lower = password.toLowerCase();
 
-  if (score <= 2) {
-    return { score: 'weak', label: 'Weak', percentage: 33 };
-  } else if (score <= 4) {
-    return { score: 'medium', label: 'Medium', percentage: 66 };
+  // Common password checks
+  if (COMMON_PASSWORDS.has(lower)) {
+    return {
+      score: 'weak',
+      label: 'Weak',
+      percentage: 25,
+      feedback: 'This is an easily guessable common password.'
+    };
+  }
+
+  // Common substring checks (e.g. "mysecretpassword123")
+  const containsCommonWord = ['password', 'admin', 'qwerty', '123456', 'welcome', 'letmein'].some(
+    (w) => lower.includes(w)
+  );
+
+  const hasLower = /[a-z]/.test(password);
+  const hasUpper = /[A-Z]/.test(password);
+  const hasDigit = /[0-9]/.test(password);
+  const hasSymbol = /[^A-Za-z0-9]/.test(password);
+  const varietyCount = [hasLower, hasUpper, hasDigit, hasSymbol].filter(Boolean).length;
+
+  const hasRepeated = /(.)\1{2,}/.test(password); // e.g. "aaa", "111"
+  const isSequential = hasSequentialPattern(password, 4);
+
+  // If containing very common words and under 16 characters -> Weak or Medium
+  if (containsCommonWord && length < 16) {
+    return {
+      score: 'weak',
+      label: 'Weak',
+      percentage: 30,
+      feedback: 'Contains easily guessable dictionary words.'
+    };
+  }
+
+  // Scoring algorithm (0 to 100)
+  let points = 0;
+
+  // Length contributions
+  if (length >= 8 && length < 12) points += 25;
+  else if (length >= 12 && length < 16) points += 45;
+  else if (length >= 16 && length < 20) points += 65;
+  else if (length >= 20) points += 80;
+
+  // Variety contributions
+  points += varietyCount * 6; // up to 24 points
+
+  // Variety bonus if all 4 categories are present
+  if (varietyCount === 4) points += 10;
+
+  // Penalties
+  if (varietyCount === 1) points -= 25;
+  if (hasRepeated) points -= 15;
+  if (isSequential) points -= 15;
+  if (containsCommonWord) points -= 20;
+
+  // Minimum and Maximum clamping
+  points = Math.max(15, Math.min(100, points));
+
+  // Determine Level: Weak, Medium, Strong, Very Strong
+  // Very Strong strictly requires length >= 20, all 4 character classes, and no common/repetitive patterns.
+  if (length >= 20 && varietyCount === 4 && !hasRepeated && !isSequential && !containsCommonWord) {
+    return {
+      score: 'very-strong',
+      label: 'Very Strong',
+      percentage: 100,
+      feedback: 'Cryptographically exceptional entropy. Highly resilient against brute-force attacks.'
+    };
+  } else if (points >= 70 && varietyCount >= 3 && length >= 12) {
+    return {
+      score: 'strong',
+      label: 'Strong',
+      percentage: 75,
+      feedback: 'Strong passphrase with high character diversity.'
+    };
+  } else if (points >= 40 && length >= 8) {
+    return {
+      score: 'medium',
+      label: 'Medium',
+      percentage: 50,
+      feedback: 'Moderate strength. Consider adding symbols, numbers, or increasing length.'
+    };
   } else {
-    return { score: 'strong', label: 'Strong', percentage: 100 };
+    return {
+      score: 'weak',
+      label: 'Weak',
+      percentage: 25,
+      feedback: 'Weak passphrase. Avoid predictable patterns and increase length.'
+    };
   }
+}
+
+/**
+ * Generates an automatic cryptographically secure random password of specified length (min 20, default 24).
+ * Uses window.crypto.getRandomValues() with rejection sampling to eliminate modulo bias.
+ * Ensures uppercase letters, lowercase letters, numbers, and special characters are included.
+ * Never uses dictionary words, names, dates, or predictable patterns.
+ */
+export function generateSecurePassword(length: number = 24): string {
+  const targetLength = Math.max(20, length);
+
+  const uppercase = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  const lowercase = "abcdefghijklmnopqrstuvwxyz";
+  const numbers = "0123456789";
+  const symbols = "!@#$%^&*()_+-=[]{}|;:,.<>?";
+  const allChars = uppercase + lowercase + numbers + symbols;
+
+  const cryptoObj = (typeof window !== 'undefined' && window.crypto) || globalThis.crypto;
+
+  if (!cryptoObj || typeof cryptoObj.getRandomValues !== 'function') {
+    throw new Error('Cryptographically secure random number generator (crypto.getRandomValues) is not available.');
+  }
+
+  // Cryptographically secure random integer in [0, max) using rejection sampling
+  function getSecureRandomInt(max: number): number {
+    const limit = Math.floor(0xffffffff / max) * max;
+    const array = new Uint32Array(1);
+    while (true) {
+      cryptoObj.getRandomValues(array);
+      if (array[0] < limit) {
+        return array[0] % max;
+      }
+    }
+  }
+
+  // Guarantee presence of character sets: at least 2 of each category
+  const chars: string[] = [
+    uppercase[getSecureRandomInt(uppercase.length)],
+    uppercase[getSecureRandomInt(uppercase.length)],
+    lowercase[getSecureRandomInt(lowercase.length)],
+    lowercase[getSecureRandomInt(lowercase.length)],
+    numbers[getSecureRandomInt(numbers.length)],
+    numbers[getSecureRandomInt(numbers.length)],
+    symbols[getSecureRandomInt(symbols.length)],
+    symbols[getSecureRandomInt(symbols.length)],
+  ];
+
+  // Fill remaining positions uniformly from combined character set
+  while (chars.length < targetLength) {
+    chars.push(allChars[getSecureRandomInt(allChars.length)]);
+  }
+
+  // Cryptographic Fisher-Yates shuffle
+  for (let i = chars.length - 1; i > 0; i--) {
+    const j = getSecureRandomInt(i + 1);
+    const temp = chars[i];
+    chars[i] = chars[j];
+    chars[j] = temp;
+  }
+
+  return chars.join("");
 }
 
 /**

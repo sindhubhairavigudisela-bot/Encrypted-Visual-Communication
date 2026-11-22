@@ -13,10 +13,16 @@ import {
   RefreshCw,
   ArrowRight,
   ShieldAlert,
+  Sparkles,
+  Copy,
+  Check,
+  AlertTriangle,
+  ShieldCheck,
 } from 'lucide-react';
 import {
   encryptImage,
   getPasswordStrength,
+  generateSecurePassword,
   formatBytes,
   type EncryptionResult,
 } from '../utils/crypto';
@@ -37,6 +43,13 @@ export const EncryptPage: React.FC = () => {
   const [confirmPassword, setConfirmPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+
+  // Password Generator State
+  const [isPasswordGenerated, setIsPasswordGenerated] = useState(false);
+  const [hasCopiedPassword, setHasCopiedPassword] = useState(false);
+  const [copySuccess, setCopySuccess] = useState(false);
+  const [showGeneratedPassword, setShowGeneratedPassword] = useState(true);
+  const [showUncopiedWarningModal, setShowUncopiedWarningModal] = useState(false);
 
   // Status & Progress
   const [isEncrypting, setIsEncrypting] = useState(false);
@@ -63,6 +76,53 @@ export const EncryptPage: React.FC = () => {
   };
 
   const passwordError = getPasswordError();
+
+  // Password Generator Handler
+  const handleGeneratePassword = () => {
+    const newPassword = generateSecurePassword(24);
+    setPassword(newPassword);
+    setConfirmPassword(newPassword);
+    setIsPasswordGenerated(true);
+    setHasCopiedPassword(false);
+    setCopySuccess(false);
+    setShowGeneratedPassword(true);
+    setShowPassword(true);
+    setShowConfirmPassword(true);
+    setErrorMessage(null);
+  };
+
+  // Copy Password Handler
+  const handleCopyPassword = async () => {
+    if (!password) return;
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(password);
+      } else {
+        const textArea = document.createElement('textarea');
+        textArea.value = password;
+        document.body.appendChild(textArea);
+        textArea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textArea);
+      }
+      setHasCopiedPassword(true);
+      setCopySuccess(true);
+      setTimeout(() => {
+        setCopySuccess(false);
+      }, 2500);
+    } catch (err) {
+      console.error('Failed to copy password:', err);
+    }
+  };
+
+  // Switch to Manual Password Entry
+  const handleSwitchToManual = () => {
+    setIsPasswordGenerated(false);
+    setHasCopiedPassword(false);
+    setCopySuccess(false);
+    setPassword('');
+    setConfirmPassword('');
+  };
 
   // File handle logic
   const handleFileSelect = (file: File) => {
@@ -114,14 +174,14 @@ export const EncryptPage: React.FC = () => {
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
-  const handleEncrypt = async () => {
+  // Encryption execution
+  const executeEncryption = async () => {
     if (!imageDetails || !isPasswordValid || isEncrypting) return;
 
     setIsEncrypting(true);
     setErrorMessage(null);
 
     try {
-      // Simulate minor step delay for smooth progress UI
       const result = await encryptImage(
         imageDetails.file,
         password,
@@ -137,6 +197,19 @@ export const EncryptPage: React.FC = () => {
     } finally {
       setIsEncrypting(false);
     }
+  };
+
+  // Triggered when user clicks "Encrypt Image"
+  const handleEncryptClick = () => {
+    if (!imageDetails || !isPasswordValid || isEncrypting) return;
+
+    // Warn if password was generated but has not been copied or saved yet
+    if (isPasswordGenerated && !hasCopiedPassword) {
+      setShowUncopiedWarningModal(true);
+      return;
+    }
+
+    executeEncryption();
   };
 
   const handleDownloadEVC = () => {
@@ -155,6 +228,9 @@ export const EncryptPage: React.FC = () => {
     handleRemoveImage();
     setPassword('');
     setConfirmPassword('');
+    setIsPasswordGenerated(false);
+    setHasCopiedPassword(false);
+    setCopySuccess(false);
     setEncryptionResult(null);
   };
 
@@ -274,26 +350,151 @@ export const EncryptPage: React.FC = () => {
 
           {/* STEP 02 — SECRET KEY */}
           <section className="glass-card p-6 sm:p-8 rounded-3xl space-y-6">
-            <div className="flex items-center space-x-3">
-              <div className="w-8 h-8 rounded-lg bg-purple-600/30 text-purple-400 border border-purple-500/40 flex items-center justify-center font-bold text-sm">
-                02
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div className="flex items-center space-x-3">
+                <div className="w-8 h-8 rounded-lg bg-purple-600/30 text-purple-400 border border-purple-500/40 flex items-center justify-center font-bold text-sm">
+                  02
+                </div>
+                <div>
+                  <h2 className="text-xl font-bold text-white">Secure With Key</h2>
+                  <p className="text-xs text-slate-400">Provide a passphrase or generate a cryptographically secure key.</p>
+                </div>
               </div>
-              <h2 className="text-xl font-bold text-white">Secure With Key</h2>
+
+              {/* Generate Secure Password Button */}
+              <button
+                type="button"
+                onClick={handleGeneratePassword}
+                className="inline-flex items-center justify-center space-x-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white text-xs sm:text-sm font-bold shadow-lg shadow-purple-900/40 hover:shadow-purple-600/50 hover:scale-[1.02] active:scale-[0.98] transition-all border border-purple-400/30"
+              >
+                <Sparkles className="w-4 h-4 text-purple-200 animate-pulse" />
+                <span>Generate Secure Password</span>
+              </button>
             </div>
 
+            {/* GENERATED PASSWORD DISPLAY CARD (Shows when password is automatically generated) */}
+            {isPasswordGenerated && (
+              <div className="p-5 rounded-2xl bg-gradient-to-b from-purple-950/40 to-slate-950/80 border border-purple-500/40 space-y-4 shadow-xl shadow-purple-950/30 animate-fadeIn">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div className="flex items-center space-x-2">
+                    <span className="w-2 h-2 rounded-full bg-cyan-400 animate-ping"></span>
+                    <span className="text-xs font-bold uppercase tracking-wider text-cyan-300">
+                      Generated Secure Key
+                    </span>
+                    <span className="text-[11px] px-2 py-0.5 rounded-full bg-cyan-950/60 text-cyan-300 border border-cyan-800/50">
+                      24 chars • Cryptographically Random
+                    </span>
+                  </div>
+
+                  <div className="flex items-center space-x-2">
+                    <button
+                      type="button"
+                      onClick={() => setShowGeneratedPassword(!showGeneratedPassword)}
+                      className="inline-flex items-center space-x-1 px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 text-xs font-medium border border-slate-700/60 transition-colors"
+                      title={showGeneratedPassword ? 'Hide password' : 'Show password'}
+                    >
+                      {showGeneratedPassword ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                      <span>{showGeneratedPassword ? 'Hide' : 'Show'}</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handleGeneratePassword}
+                      className="inline-flex items-center space-x-1 px-2.5 py-1 rounded-lg bg-purple-900/60 hover:bg-purple-800/80 text-purple-200 text-xs font-medium border border-purple-700/60 transition-colors"
+                      title="Regenerate another password"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" />
+                      <span>Regenerate</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handleSwitchToManual}
+                      className="text-xs text-slate-400 hover:text-slate-200 underline pl-1"
+                    >
+                      Manual entry
+                    </button>
+                  </div>
+                </div>
+
+                {/* Password Box & Copy Action */}
+                <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+                  <div className="flex-1 px-4 py-3 rounded-xl bg-slate-950/90 border border-purple-500/30 font-mono text-sm sm:text-base tracking-wider text-purple-200 break-all select-all flex items-center justify-between">
+                    <span>
+                      {showGeneratedPassword ? password : '•'.repeat(password.length || 24)}
+                    </span>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={handleCopyPassword}
+                    className={`px-5 py-3 rounded-xl font-bold text-xs sm:text-sm flex items-center justify-center space-x-2 transition-all ${
+                      copySuccess
+                        ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-900/50'
+                        : 'bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white shadow-lg shadow-blue-900/30'
+                    }`}
+                  >
+                    {copySuccess ? (
+                      <>
+                        <Check className="w-4 h-4 text-emerald-200" />
+                        <span>Copied to Clipboard!</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-4 h-4" />
+                        <span>Copy Password</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+
+                {/* Guidance Message & Warning Notice */}
+                <div className="p-3.5 rounded-xl bg-slate-950/60 border border-slate-800 space-y-2 text-xs">
+                  <p className="text-slate-300 leading-relaxed">
+                    <span className="font-bold text-white">Security Guidance: </span>
+                    Your password is generated securely. Save it safely and share it with the intended receiver through a separate trusted channel. Without the correct password, the encrypted image cannot be recovered.
+                  </p>
+                  
+                  <div className="flex items-center space-x-2 pt-1 border-t border-slate-900 text-[11px]">
+                    {hasCopiedPassword ? (
+                      <span className="text-emerald-400 font-semibold flex items-center space-x-1.5">
+                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                        <span>Password copied to clipboard. (Tip: Store it in a secure password manager or offline vault).</span>
+                      </span>
+                    ) : (
+                      <span className="text-amber-400 font-semibold flex items-center space-x-1.5">
+                        <AlertTriangle className="w-3.5 h-3.5 text-amber-400 flex-shrink-0" />
+                        <span>Password not copied yet. Remember to copy and record it before encrypting.</span>
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Secret Key Input Fields */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               {/* Secret Key Input */}
               <div className="space-y-2">
-                <label className="block text-xs font-bold text-slate-300 uppercase tracking-wider">
-                  Secret Key
-                </label>
+                <div className="flex items-center justify-between">
+                  <label className="block text-xs font-bold text-slate-300 uppercase tracking-wider">
+                    Secret Key
+                  </label>
+                  {isPasswordGenerated && (
+                    <span className="text-[10px] text-cyan-400 font-medium">Auto-filled by generator</span>
+                  )}
+                </div>
                 <div className="relative">
                   <input
                     type={showPassword ? 'text' : 'password'}
                     value={password}
-                    onChange={(e) => setPassword(e.target.value)}
+                    onChange={(e) => {
+                      setPassword(e.target.value);
+                      setIsPasswordGenerated(false);
+                      setHasCopiedPassword(false);
+                    }}
                     placeholder="Enter secret passphrase"
-                    className="w-full px-4 py-3 rounded-xl glass-input pr-10 text-sm"
+                    className="w-full px-4 py-3 rounded-xl glass-input pr-10 text-sm font-mono"
                   />
                   <button
                     type="button"
@@ -307,16 +508,25 @@ export const EncryptPage: React.FC = () => {
 
               {/* Confirm Secret Key Input */}
               <div className="space-y-2">
-                <label className="block text-xs font-bold text-slate-300 uppercase tracking-wider">
-                  Confirm Secret Key
-                </label>
+                <div className="flex items-center justify-between">
+                  <label className="block text-xs font-bold text-slate-300 uppercase tracking-wider">
+                    Confirm Secret Key
+                  </label>
+                  {isPasswordGenerated && (
+                    <span className="text-[10px] text-cyan-400 font-medium">Auto-matched</span>
+                  )}
+                </div>
                 <div className="relative">
                   <input
                     type={showConfirmPassword ? 'text' : 'password'}
                     value={confirmPassword}
-                    onChange={(e) => setConfirmPassword(e.target.value)}
+                    onChange={(e) => {
+                      setConfirmPassword(e.target.value);
+                      setIsPasswordGenerated(false);
+                      setHasCopiedPassword(false);
+                    }}
                     placeholder="Re-enter secret passphrase"
-                    className="w-full px-4 py-3 rounded-xl glass-input pr-10 text-sm"
+                    className="w-full px-4 py-3 rounded-xl glass-input pr-10 text-sm font-mono"
                   />
                   <button
                     type="button"
@@ -336,21 +546,26 @@ export const EncryptPage: React.FC = () => {
                   <span className="text-slate-400">Password Strength:</span>
                   <span
                     className={
-                      strength.score === 'strong'
+                      strength.score === 'very-strong'
+                        ? 'text-cyan-400 font-extrabold flex items-center space-x-1'
+                        : strength.score === 'strong'
                         ? 'text-emerald-400 font-bold'
                         : strength.score === 'medium'
                         ? 'text-amber-400 font-bold'
                         : 'text-rose-400 font-bold'
                     }
                   >
-                    {strength.label}
+                    {strength.score === 'very-strong' && <ShieldCheck className="w-4 h-4 text-cyan-400 inline" />}
+                    <span>{strength.label}</span>
                   </span>
                 </div>
 
                 <div className="w-full h-2 rounded-full bg-slate-800 overflow-hidden">
                   <div
                     className={`h-full transition-all duration-300 ${
-                      strength.score === 'strong'
+                      strength.score === 'very-strong'
+                        ? 'bg-gradient-to-r from-emerald-400 via-cyan-400 to-indigo-400'
+                        : strength.score === 'strong'
                         ? 'bg-emerald-500'
                         : strength.score === 'medium'
                         ? 'bg-amber-500'
@@ -359,6 +574,12 @@ export const EncryptPage: React.FC = () => {
                     style={{ width: `${strength.percentage}%` }}
                   />
                 </div>
+
+                {strength.feedback && (
+                  <p className="text-[11px] text-slate-400">
+                    {strength.feedback}
+                  </p>
+                )}
 
                 {passwordError && (
                   <div className="flex items-center space-x-2 text-rose-400 text-xs font-semibold">
@@ -373,7 +594,7 @@ export const EncryptPage: React.FC = () => {
           {/* STEP 03 — ENCRYPT BUTTON */}
           <div className="pt-2">
             <button
-              onClick={handleEncrypt}
+              onClick={handleEncryptClick}
               disabled={!imageDetails || !isPasswordValid || isEncrypting}
               className={`w-full py-4 rounded-2xl font-bold text-lg shadow-xl transition-all flex items-center justify-center space-x-3 ${
                 !imageDetails || !isPasswordValid || isEncrypting
@@ -460,6 +681,73 @@ export const EncryptPage: React.FC = () => {
               >
                 <span>Go to Decrypt</span>
                 <ArrowRight className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* WARNING MODAL: UNCOPIED GENERATED PASSWORD */}
+      {showUncopiedWarningModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-fadeIn">
+          <div className="glass-card border border-amber-500/50 rounded-3xl p-6 sm:p-8 max-w-lg w-full space-y-6 shadow-2xl shadow-amber-950/40">
+            <div className="flex items-center space-x-3 text-amber-400">
+              <div className="w-12 h-12 rounded-2xl bg-amber-950/60 border border-amber-500/40 flex items-center justify-center flex-shrink-0">
+                <AlertTriangle className="w-6 h-6" />
+              </div>
+              <div>
+                <h3 className="text-lg font-bold text-white">Save Your Generated Password</h3>
+                <p className="text-xs text-amber-300/80">You have not copied or recorded this key yet.</p>
+              </div>
+            </div>
+
+            <div className="p-4 rounded-2xl bg-slate-950/80 border border-slate-800 space-y-3">
+              <p className="text-xs sm:text-sm text-slate-300 leading-relaxed">
+                Your password is generated securely. Save it safely and share it with the intended receiver through a separate trusted channel. Without the correct password, the encrypted image cannot be recovered.
+              </p>
+              <p className="text-[11px] text-slate-400 italic">
+                Note: Copying places the key on your clipboard for immediate transfer, but clipboard contents can be lost or overwritten. Please ensure you store it safely in an encrypted password manager or offline vault.
+              </p>
+            </div>
+
+            {/* Password Preview Box inside Modal */}
+            <div className="px-4 py-3 rounded-xl bg-slate-900 border border-purple-500/30 font-mono text-sm tracking-wider text-purple-300 break-all select-all">
+              {password}
+            </div>
+
+            {/* Modal Actions */}
+            <div className="flex flex-col sm:flex-row gap-3">
+              <button
+                type="button"
+                onClick={async () => {
+                  await handleCopyPassword();
+                  setShowUncopiedWarningModal(false);
+                  executeEncryption();
+                }}
+                className="flex-1 py-3 px-4 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold text-xs sm:text-sm flex items-center justify-center space-x-2 transition-all shadow-lg shadow-emerald-950/50"
+              >
+                <Copy className="w-4 h-4" />
+                <span>Copy & Proceed to Encrypt</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setHasCopiedPassword(true);
+                  setShowUncopiedWarningModal(false);
+                  executeEncryption();
+                }}
+                className="py-3 px-4 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-slate-300 font-semibold text-xs sm:text-sm transition-colors border border-slate-700"
+              >
+                Proceed Without Copying
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setShowUncopiedWarningModal(false)}
+                className="py-3 px-4 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-white font-semibold text-xs sm:text-sm transition-colors"
+              >
+                Cancel
               </button>
             </div>
           </div>
