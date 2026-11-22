@@ -1,15 +1,41 @@
 /**
  * Cryptographic Utility for Encrypted Visual Communication (EVC)
  * Uses Browser Web Crypto API (window.crypto.subtle)
- * Algorithm: AES-GCM 256-bit
- * Key Derivation: PBKDF2 (SHA-256, 100,000 iterations)
+ * Supported Algorithms:
+ *  - Symmetric: AES-GCM (128-bit, 192-bit, 256-bit) via PBKDF2 (SHA-256, 100,000 iterations)
+ *  - Asymmetric: RSA-OAEP (2048-bit, 3072-bit, 4096-bit) Hybrid with AES-GCM 256-bit
+ *  - Passphrase-Protected RSA Private Key Export/Import
+ *  - Full backward compatibility with existing .evc container formats
  */
+
+import {
+  deriveShuffleSeed,
+  generatePermutationMap,
+} from './pixelShuffle.ts';
+
+export type AESKeySize = 128 | 192 | 256;
+export type RSAKeySize = 2048 | 3072 | 4096;
+export type EncryptionMethod = 'standard' | 'pixel-shuffle';
+export type EncryptionType = 'symmetric' | 'asymmetric';
 
 export interface EVCMetadata {
   originalName: string;
   mimeType: string;
   size: number;
   timestamp: number;
+  // Versioning and algorithm identifiers
+  version?: number; // 1 for legacy, 2 for enhanced
+  method?: EncryptionMethod; // default 'standard'
+  encryptionType?: EncryptionType; // default 'symmetric'
+  algorithm?: string; // 'AES-GCM' | 'RSA-OAEP+AES-GCM'
+  keySize?: number; // 128 | 192 | 256 | 2048 | 3072 | 4096
+  encryptedKey?: string; // Base64-encoded encrypted AES key for RSA hybrid
+  pixelShuffle?: {
+    enabled: boolean;
+    protectedWithAES: boolean;
+    width: number;
+    height: number;
+  };
 }
 
 export interface EncryptionResult {
@@ -39,14 +65,37 @@ const SALT_SIZE = 16;
 const IV_SIZE = 12;
 const PBKDF2_ITERATIONS = 100000;
 
+// Helper: Base64 encoding / decoding
+export function arrayBufferToBase64(buffer: ArrayBuffer | Uint8Array): string {
+  const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+  let binary = '';
+  for (let i = 0; i < bytes.byteLength; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
+export function base64ToArrayBuffer(base64: string): ArrayBuffer {
+  const binary = atob(base64.replace(/\s+/g, ''));
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes.buffer as ArrayBuffer;
+}
+
 /**
- * Derives an AES-GCM 256-bit key from a plain text password and salt using PBKDF2.
+ * Derives an AES-GCM key from a plain text password and salt using PBKDF2.
+ * Supports keyLength: 128, 192, or 256 bits (default 256).
  */
-export async function deriveKey(password: string, salt: Uint8Array): Promise<CryptoKey> {
+export async function deriveKey(
+  password: string,
+  salt: Uint8Array,
+  keyLength: AESKeySize = 256
+): Promise<CryptoKey> {
   const encoder = new TextEncoder();
   const passwordBytes = encoder.encode(password);
   
-  // Ensure we pass a clean 16-byte ArrayBuffer copy
   const cleanSalt = salt.byteOffset === 0 && salt.byteLength === salt.buffer.byteLength
     ? salt
     : salt.slice();
@@ -69,19 +118,21 @@ export async function deriveKey(password: string, salt: Uint8Array): Promise<Cry
       hash: "SHA-256",
     },
     keyMaterial,
-    { name: "AES-GCM", length: 256 },
+    { name: "AES-GCM", length: keyLength },
     false,
     ["encrypt", "decrypt"]
   );
 }
 
 /**
- * Encrypts an image File into a structured .evc binary container.
+ * Encrypts an image File into a structured .evc binary container using Symmetric AES-GCM.
+ * Supports AES-128, AES-192, and AES-256 (default).
  */
 export async function encryptImage(
   file: File,
   password: string,
-  onProgress?: (step: string) => void
+  onProgress?: (step: string) => void,
+  keySize: AESKeySize = 256
 ): Promise<EncryptionResult> {
   onProgress?.("Preparing image...");
   const imageArrayBuffer = await file.arrayBuffer();
@@ -89,13 +140,12 @@ export async function encryptImage(
   const cryptoObj = (typeof window !== 'undefined' && window.crypto) || globalThis.crypto;
 
   onProgress?.("Generating secure key...");
-  // Cryptographically random salt and IV
   const salt = cryptoObj.getRandomValues(new Uint8Array(SALT_SIZE));
   const iv = cryptoObj.getRandomValues(new Uint8Array(IV_SIZE));
 
-  const key = await deriveKey(password, salt);
+  const key = await deriveKey(password, salt, keySize);
 
-  onProgress?.("Encrypting image...");
+  onProgress?.(`Encrypting image with AES-${keySize}-GCM...`);
   const ciphertextBuffer = await cryptoObj.subtle.encrypt(
     {
       name: "AES-GCM",
@@ -106,8 +156,12 @@ export async function encryptImage(
   );
 
   onProgress?.("Creating EVC file...");
-  // Construct Metadata
   const metadata: EVCMetadata = {
+    version: 2,
+    method: 'standard',
+    encryptionType: 'symmetric',
+    algorithm: 'AES-GCM',
+    keySize: keySize,
     originalName: file.name,
     mimeType: file.type || "image/png",
     size: file.size,
@@ -117,7 +171,6 @@ export async function encryptImage(
   const metadataJson = JSON.stringify(metadata);
   const metadataBytes = new TextEncoder().encode(metadataJson);
 
-  // Calculate container size
   const containerSize =
     4 + 2 + SALT_SIZE + 2 + IV_SIZE + 4 + metadataBytes.byteLength + ciphertextBuffer.byteLength;
 
@@ -126,36 +179,13 @@ export async function encryptImage(
   const uint8View = new Uint8Array(containerBuffer);
 
   let offset = 0;
-
-  // 1. Magic Bytes (4 bytes)
-  uint8View.set(MAGIC_BYTES, offset);
-  offset += 4;
-
-  // 2. Salt Length (2 bytes)
-  view.setUint16(offset, SALT_SIZE, false);
-  offset += 2;
-
-  // 3. Salt (16 bytes)
-  uint8View.set(salt, offset);
-  offset += SALT_SIZE;
-
-  // 4. IV Length (2 bytes)
-  view.setUint16(offset, IV_SIZE, false);
-  offset += 2;
-
-  // 5. IV (12 bytes)
-  uint8View.set(iv, offset);
-  offset += IV_SIZE;
-
-  // 6. Metadata Length (4 bytes)
-  view.setUint32(offset, metadataBytes.byteLength, false);
-  offset += 4;
-
-  // 7. Metadata Bytes
-  uint8View.set(metadataBytes, offset);
-  offset += metadataBytes.byteLength;
-
-  // 8. Ciphertext
+  uint8View.set(MAGIC_BYTES, offset); offset += 4;
+  view.setUint16(offset, SALT_SIZE, false); offset += 2;
+  uint8View.set(salt, offset); offset += SALT_SIZE;
+  view.setUint16(offset, IV_SIZE, false); offset += 2;
+  uint8View.set(iv, offset); offset += IV_SIZE;
+  view.setUint32(offset, metadataBytes.byteLength, false); offset += 4;
+  uint8View.set(metadataBytes, offset); offset += metadataBytes.byteLength;
   uint8View.set(new Uint8Array(ciphertextBuffer), offset);
 
   onProgress?.("Encryption complete");
@@ -167,6 +197,324 @@ export async function encryptImage(
     blob: evcBlob,
     evcFileName,
     originalName: file.name,
+    encryptedSize: evcBlob.size,
+  };
+}
+
+/**
+ * Generates an RSA-OAEP key pair with SHA-256 for asymmetric hybrid encryption.
+ * Supports modulusLength: 2048, 3072, 4096 bits.
+ */
+export async function generateRSAKeyPair(
+  modulusLength: RSAKeySize = 2048
+): Promise<CryptoKeyPair> {
+  const cryptoObj = (typeof window !== 'undefined' && window.crypto) || globalThis.crypto;
+  return cryptoObj.subtle.generateKey(
+    {
+      name: "RSA-OAEP",
+      modulusLength: modulusLength,
+      publicExponent: new Uint8Array([1, 0, 1]), // 65537
+      hash: "SHA-256",
+    },
+    true,
+    ["encrypt", "decrypt"]
+  );
+}
+
+/**
+ * Exports an RSA Public Key in standard SPKI PEM format.
+ */
+export async function exportRSAPublicKeyPEM(publicKey: CryptoKey): Promise<string> {
+  const cryptoObj = (typeof window !== 'undefined' && window.crypto) || globalThis.crypto;
+  const spki = await cryptoObj.subtle.exportKey("spki", publicKey);
+  const b64 = arrayBufferToBase64(spki);
+  const formatted = b64.match(/.{1,64}/g)?.join('\n') || b64;
+  return `-----BEGIN PUBLIC KEY-----\n${formatted}\n-----END PUBLIC KEY-----`;
+}
+
+/**
+ * Imports an RSA Public Key from SPKI PEM format.
+ */
+export async function importRSAPublicKeyPEM(pem: string): Promise<CryptoKey> {
+  const cryptoObj = (typeof window !== 'undefined' && window.crypto) || globalThis.crypto;
+  const cleaned = pem
+    .replace(/-----BEGIN PUBLIC KEY-----/g, '')
+    .replace(/-----END PUBLIC KEY-----/g, '')
+    .replace(/\s+/g, '');
+  if (!cleaned) throw new Error("Invalid or empty Public Key PEM.");
+  const der = base64ToArrayBuffer(cleaned);
+  return cryptoObj.subtle.importKey(
+    "spki",
+    der,
+    {
+      name: "RSA-OAEP",
+      hash: "SHA-256",
+    },
+    true,
+    ["encrypt"]
+  );
+}
+
+/**
+ * Exports an RSA Private Key PROTECTED with a user-provided passphrase.
+ * Encrypts PKCS#8 private key bytes using AES-GCM 256-bit derived via PBKDF2/SHA-256.
+ * Never exports an unprotected private key.
+ */
+export async function exportProtectedRSAPrivateKeyPEM(
+  privateKey: CryptoKey,
+  passphrase: string
+): Promise<string> {
+  if (!passphrase || passphrase.length < 8) {
+    throw new Error("A passphrase of at least 8 characters is required to protect the private key.");
+  }
+  const cryptoObj = (typeof window !== 'undefined' && window.crypto) || globalThis.crypto;
+  
+  // 1. Export raw PKCS#8 bytes
+  const pkcs8 = await cryptoObj.subtle.exportKey("pkcs8", privateKey);
+
+  // 2. Encrypt the PKCS#8 bytes with AES-GCM
+  const salt = cryptoObj.getRandomValues(new Uint8Array(SALT_SIZE));
+  const iv = cryptoObj.getRandomValues(new Uint8Array(IV_SIZE));
+  const derivedKey = await deriveKey(passphrase, salt, 256);
+
+  const encryptedBytes = await cryptoObj.subtle.encrypt(
+    { name: "AES-GCM", iv: iv.buffer as ArrayBuffer },
+    derivedKey,
+    pkcs8
+  );
+
+  // 3. Envelope: [16B salt] [12B IV] [encrypted PKCS#8]
+  const envelope = new Uint8Array(SALT_SIZE + IV_SIZE + encryptedBytes.byteLength);
+  envelope.set(salt, 0);
+  envelope.set(iv, SALT_SIZE);
+  envelope.set(new Uint8Array(encryptedBytes), SALT_SIZE + IV_SIZE);
+
+  const b64 = arrayBufferToBase64(envelope);
+  const formatted = b64.match(/.{1,64}/g)?.join('\n') || b64;
+  return `-----BEGIN ENCRYPTED PRIVATE KEY-----\n${formatted}\n-----END ENCRYPTED PRIVATE KEY-----`;
+}
+
+/**
+ * Imports an RSA Private Key from a passphrase-protected PEM file.
+ */
+export async function importProtectedRSAPrivateKeyPEM(
+  pem: string,
+  passphrase: string
+): Promise<CryptoKey> {
+  if (!passphrase) {
+    throw new Error("Passphrase is required to unlock the protected private key.");
+  }
+  const cryptoObj = (typeof window !== 'undefined' && window.crypto) || globalThis.crypto;
+  const cleaned = pem
+    .replace(/-----BEGIN ENCRYPTED PRIVATE KEY-----/g, '')
+    .replace(/-----END ENCRYPTED PRIVATE KEY-----/g, '')
+    .replace(/\s+/g, '');
+
+  if (!cleaned) throw new Error("Invalid or empty Private Key PEM.");
+
+  const envelope = new Uint8Array(base64ToArrayBuffer(cleaned));
+  if (envelope.byteLength < SALT_SIZE + IV_SIZE + 16) {
+    throw new Error("Invalid or corrupted encrypted private key container.");
+  }
+
+  const salt = envelope.slice(0, SALT_SIZE);
+  const iv = envelope.slice(SALT_SIZE, SALT_SIZE + IV_SIZE);
+  const ciphertext = envelope.slice(SALT_SIZE + IV_SIZE);
+
+  const derivedKey = await deriveKey(passphrase, salt, 256);
+
+  let decryptedPkcs8: ArrayBuffer;
+  try {
+    decryptedPkcs8 = await cryptoObj.subtle.decrypt(
+      { name: "AES-GCM", iv: iv.buffer as ArrayBuffer },
+      derivedKey,
+      ciphertext.buffer as ArrayBuffer
+    );
+  } catch {
+    throw new Error("Incorrect passphrase for private key or corrupted key file.");
+  }
+
+  return cryptoObj.subtle.importKey(
+    "pkcs8",
+    decryptedPkcs8,
+    {
+      name: "RSA-OAEP",
+      hash: "SHA-256",
+    },
+    true,
+    ["decrypt"]
+  );
+}
+
+/**
+ * Encrypts an image File using Asymmetric RSA Hybrid Encryption:
+ * 1. Generates an ephemeral 256-bit AES-GCM key.
+ * 2. Encrypts the raw image bytes with AES-GCM.
+ * 3. Encrypts the ephemeral AES key with the recipient's RSA public key using RSA-OAEP.
+ * 4. Stores encrypted AES key and ciphertext in the standard .evc container.
+ */
+export async function encryptImageRSA(
+  file: File,
+  recipientPublicKey: CryptoKey,
+  rsaKeySize: RSAKeySize,
+  onProgress?: (step: string) => void
+): Promise<EncryptionResult> {
+  onProgress?.("Preparing image...");
+  const imageArrayBuffer = await file.arrayBuffer();
+
+  const cryptoObj = (typeof window !== 'undefined' && window.crypto) || globalThis.crypto;
+
+  onProgress?.("Generating ephemeral AES key...");
+  const aesRawKey = cryptoObj.getRandomValues(new Uint8Array(32)); // 256 bits
+  const aesKey = await cryptoObj.subtle.importKey(
+    "raw",
+    aesRawKey.buffer as ArrayBuffer,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"]
+  );
+
+  onProgress?.("Encrypting image with AES-GCM...");
+  const iv = cryptoObj.getRandomValues(new Uint8Array(IV_SIZE));
+  const ciphertextBuffer = await cryptoObj.subtle.encrypt(
+    { name: "AES-GCM", iv: iv.buffer as ArrayBuffer },
+    aesKey,
+    imageArrayBuffer
+  );
+
+  onProgress?.("Encrypting AES key with RSA-OAEP...");
+  const encryptedAesKeyBuffer = await cryptoObj.subtle.encrypt(
+    { name: "RSA-OAEP" },
+    recipientPublicKey,
+    aesRawKey.buffer as ArrayBuffer
+  );
+
+  onProgress?.("Creating EVC container...");
+  const dummySalt = cryptoObj.getRandomValues(new Uint8Array(SALT_SIZE));
+
+  const metadata: EVCMetadata = {
+    version: 2,
+    method: 'standard',
+    encryptionType: 'asymmetric',
+    algorithm: 'RSA-OAEP+AES-GCM',
+    keySize: rsaKeySize,
+    encryptedKey: arrayBufferToBase64(encryptedAesKeyBuffer),
+    originalName: file.name,
+    mimeType: file.type || "image/png",
+    size: file.size,
+    timestamp: Date.now(),
+  };
+
+  const metadataJson = JSON.stringify(metadata);
+  const metadataBytes = new TextEncoder().encode(metadataJson);
+
+  const containerSize =
+    4 + 2 + SALT_SIZE + 2 + IV_SIZE + 4 + metadataBytes.byteLength + ciphertextBuffer.byteLength;
+
+  const containerBuffer = new ArrayBuffer(containerSize);
+  const view = new DataView(containerBuffer);
+  const uint8View = new Uint8Array(containerBuffer);
+
+  let offset = 0;
+  uint8View.set(MAGIC_BYTES, offset); offset += 4;
+  view.setUint16(offset, SALT_SIZE, false); offset += 2;
+  uint8View.set(dummySalt, offset); offset += SALT_SIZE;
+  view.setUint16(offset, IV_SIZE, false); offset += 2;
+  uint8View.set(iv, offset); offset += IV_SIZE;
+  view.setUint32(offset, metadataBytes.byteLength, false); offset += 4;
+  uint8View.set(metadataBytes, offset); offset += metadataBytes.byteLength;
+  uint8View.set(new Uint8Array(ciphertextBuffer), offset);
+
+  onProgress?.("Encryption complete");
+
+  const evcBlob = new Blob([containerBuffer], { type: "application/octet-stream" });
+  const evcFileName = file.name.replace(/\.[^/.]+$/, "") + ".evc";
+
+  return {
+    blob: evcBlob,
+    evcFileName,
+    originalName: file.name,
+    encryptedSize: evcBlob.size,
+  };
+}
+
+/**
+ * Encrypts a Pixel-Shuffled image file or blob into an authenticated .evc container.
+ */
+export async function encryptPixelShuffleEVC(
+  shuffledBlob: Blob,
+  originalFileName: string,
+  width: number,
+  height: number,
+  password: string,
+  keySize: AESKeySize = 256,
+  onProgress?: (step: string) => void
+): Promise<EncryptionResult> {
+  onProgress?.("Preparing shuffled image payload...");
+  const imageArrayBuffer = await shuffledBlob.arrayBuffer();
+
+  const cryptoObj = (typeof window !== 'undefined' && window.crypto) || globalThis.crypto;
+
+  onProgress?.("Deriving AES key for container protection...");
+  const salt = cryptoObj.getRandomValues(new Uint8Array(SALT_SIZE));
+  const iv = cryptoObj.getRandomValues(new Uint8Array(IV_SIZE));
+  const key = await deriveKey(password, salt, keySize);
+
+  onProgress?.(`Encrypting shuffled payload with AES-${keySize}-GCM...`);
+  const ciphertextBuffer = await cryptoObj.subtle.encrypt(
+    { name: "AES-GCM", iv: iv.buffer as ArrayBuffer },
+    key,
+    imageArrayBuffer
+  );
+
+  onProgress?.("Creating protected .evc container...");
+  const metadata: EVCMetadata = {
+    version: 2,
+    method: 'pixel-shuffle',
+    encryptionType: 'symmetric',
+    algorithm: 'AES-GCM',
+    keySize: keySize,
+    originalName: originalFileName,
+    mimeType: shuffledBlob.type || 'image/png',
+    size: shuffledBlob.size,
+    timestamp: Date.now(),
+    pixelShuffle: {
+      enabled: true,
+      protectedWithAES: true,
+      width,
+      height,
+    },
+  };
+
+  const metadataJson = JSON.stringify(metadata);
+  const metadataBytes = new TextEncoder().encode(metadataJson);
+
+  const containerSize =
+    4 + 2 + SALT_SIZE + 2 + IV_SIZE + 4 + metadataBytes.byteLength + ciphertextBuffer.byteLength;
+
+  const containerBuffer = new ArrayBuffer(containerSize);
+  const view = new DataView(containerBuffer);
+  const uint8View = new Uint8Array(containerBuffer);
+
+  let offset = 0;
+  uint8View.set(MAGIC_BYTES, offset); offset += 4;
+  view.setUint16(offset, SALT_SIZE, false); offset += 2;
+  uint8View.set(salt, offset); offset += SALT_SIZE;
+  view.setUint16(offset, IV_SIZE, false); offset += 2;
+  uint8View.set(iv, offset); offset += IV_SIZE;
+  view.setUint32(offset, metadataBytes.byteLength, false); offset += 4;
+  uint8View.set(metadataBytes, offset); offset += metadataBytes.byteLength;
+  uint8View.set(new Uint8Array(ciphertextBuffer), offset);
+
+  onProgress?.("Protection complete");
+
+  const evcBlob = new Blob([containerBuffer], { type: "application/octet-stream" });
+  const evcFileName = originalFileName.replace(/\.[^/.]+$/, "") + ".evc";
+
+  return {
+    blob: evcBlob,
+    evcFileName,
+    originalName: originalFileName,
     encryptedSize: evcBlob.size,
   };
 }
@@ -221,17 +569,24 @@ export function inspectEVCHeader(arrayBuffer: ArrayBuffer): {
 }
 
 /**
- * Decrypts an .evc container buffer back into original image Blob using entered password.
+ * Decrypts an .evc container buffer back into original image Blob.
+ * Handles:
+ *  - Legacy AES-256 .evc files (full backward compatibility)
+ *  - Enhanced AES-128, AES-192, and AES-256 files
+ *  - RSA hybrid encrypted files using recipient private key
+ *  - Protected Pixel Shuffle files using secret key + inverse permutation
  */
 export async function decryptEVC(
   evcArrayBuffer: ArrayBuffer,
-  password: string
+  credential: string | CryptoKey,
+  privateKeyPassphrase?: string
 ): Promise<DecryptionResult> {
   const header = inspectEVCHeader(evcArrayBuffer);
   if (!header.valid || !header.metadata) {
     throw new Error(header.error || "The selected file is not a valid .EVC encrypted file.");
   }
 
+  const metadata = header.metadata;
   const view = new DataView(evcArrayBuffer);
   const uint8View = new Uint8Array(evcArrayBuffer);
 
@@ -255,31 +610,137 @@ export async function decryptEVC(
   const cryptoObj = (typeof window !== 'undefined' && window.crypto) || globalThis.crypto;
 
   try {
-    const key = await deriveKey(password, salt);
+    let decryptedArrayBuffer: ArrayBuffer;
 
-    const decryptedArrayBuffer = await cryptoObj.subtle.decrypt(
-      {
-        name: "AES-GCM",
-        iv: iv.buffer as ArrayBuffer,
-      },
-      key,
-      ciphertext.buffer as ArrayBuffer
-    );
+    if (metadata.encryptionType === 'asymmetric') {
+      // RSA Hybrid Decryption
+      if (!metadata.encryptedKey) {
+        throw new Error("Missing encrypted AES key in asymmetric container metadata.");
+      }
 
-    const blob = new Blob([decryptedArrayBuffer], { type: header.metadata.mimeType });
+      let privateKey: CryptoKey;
+      if (typeof credential === 'string') {
+        // PEM string provided
+        if (credential.includes('ENCRYPTED PRIVATE KEY')) {
+          if (!privateKeyPassphrase) {
+            throw new Error("Passphrase required to unlock the protected private key.");
+          }
+          privateKey = await importProtectedRSAPrivateKeyPEM(credential, privateKeyPassphrase);
+        } else {
+          throw new Error("Private keys must be encrypted with a passphrase.");
+        }
+      } else {
+        privateKey = credential;
+      }
+
+      // Decrypt the ephemeral AES key
+      const encryptedAesKeyBuffer = base64ToArrayBuffer(metadata.encryptedKey);
+      const aesRawKey = await cryptoObj.subtle.decrypt(
+        { name: "RSA-OAEP" },
+        privateKey,
+        encryptedAesKeyBuffer
+      );
+
+      // Import the recovered AES key
+      const aesKey = await cryptoObj.subtle.importKey(
+        "raw",
+        aesRawKey,
+        { name: "AES-GCM", length: 256 },
+        false,
+        ["decrypt"]
+      );
+
+      // Decrypt image bytes with AES-GCM
+      decryptedArrayBuffer = await cryptoObj.subtle.decrypt(
+        { name: "AES-GCM", iv: iv.buffer as ArrayBuffer },
+        aesKey,
+        ciphertext.buffer as ArrayBuffer
+      );
+
+    } else {
+      // Symmetric AES (or Legacy EVC1 file)
+      if (typeof credential !== 'string') {
+        throw new Error("Password must be a text string for symmetric decryption.");
+      }
+
+      const keySize = (metadata.keySize as AESKeySize) || 256;
+      const key = await deriveKey(credential, salt, keySize);
+
+      decryptedArrayBuffer = await cryptoObj.subtle.decrypt(
+        { name: "AES-GCM", iv: iv.buffer as ArrayBuffer },
+        key,
+        ciphertext.buffer as ArrayBuffer
+      );
+
+      // If Pixel Shuffle was applied, reverse the permutation
+      if (metadata.method === 'pixel-shuffle' && metadata.pixelShuffle?.enabled) {
+        const { width, height } = metadata.pixelShuffle;
+        // In browser context with canvas, restore original image
+        if (typeof document !== 'undefined' && typeof window !== 'undefined') {
+          const scrambledBlob = new Blob([decryptedArrayBuffer], { type: metadata.mimeType });
+          const img = new Image();
+          const imgUrl = URL.createObjectURL(scrambledBlob);
+          await new Promise<void>((resolve, reject) => {
+            img.onload = () => resolve();
+            img.onerror = () => reject(new Error('Failed to load scrambled image for un-shuffling.'));
+            img.src = imgUrl;
+          });
+          URL.revokeObjectURL(imgUrl);
+
+          const canvas = document.createElement('canvas');
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d', { willReadFrequently: true });
+          if (ctx) {
+            ctx.drawImage(img, 0, 0);
+            const scrambledImageData = ctx.getImageData(0, 0, width, height);
+
+            const totalPixels = width * height;
+            const seed = await deriveShuffleSeed(credential, `${width}x${height}`);
+            const P = generatePermutationMap(totalPixels, seed);
+
+            const scrambled32 = new Uint32Array(scrambledImageData.data.buffer);
+            const restoredData = new Uint8ClampedArray(scrambledImageData.data.length);
+            const restored32 = new Uint32Array(restoredData.buffer);
+
+            for (let i = 0; i < totalPixels; i++) {
+              restored32[i] = scrambled32[P[i]];
+            }
+
+            const restoredImageData = new ImageData(restoredData, width, height);
+            ctx.putImageData(restoredImageData, 0, 0);
+
+            const restoredBlob = await new Promise<Blob>((resolve, reject) => {
+              canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('Canvas toBlob failed.'))), metadata.mimeType);
+            });
+
+            const objectUrl = URL.createObjectURL(restoredBlob);
+            return {
+              blob: restoredBlob,
+              originalName: metadata.originalName,
+              mimeType: metadata.mimeType,
+              size: restoredBlob.size,
+              objectUrl,
+            };
+          }
+        }
+      }
+    }
+
+    const blob = new Blob([decryptedArrayBuffer], { type: metadata.mimeType });
     const objectUrl = URL.createObjectURL(blob);
 
     return {
       blob,
-      originalName: header.metadata.originalName,
-      mimeType: header.metadata.mimeType,
-      size: header.metadata.size || blob.size,
+      originalName: metadata.originalName,
+      mimeType: metadata.mimeType,
+      size: metadata.size || blob.size,
       objectUrl,
     };
   } catch (err: unknown) {
-    console.error("AES-GCM Decryption failed:", err);
+    console.error("Decryption failed:", err);
     throw new Error(
-      "Unable to Decrypt — The secret key is incorrect or the encrypted file has been corrupted."
+      "Unable to Decrypt — The secret key / private key is incorrect or the encrypted file has been corrupted."
     );
   }
 }
@@ -296,9 +757,6 @@ const COMMON_PASSWORDS = new Set([
   'football', 'baseball', 'default', 'default123', 'trustno1', 'changeme'
 ]);
 
-/**
- * Checks for repeated sequential character patterns (e.g., "1234", "abcd", "dcba").
- */
 function hasSequentialPattern(str: string, minLength: number = 4): boolean {
   const lower = str.toLowerCase();
   let forwardCount = 1;
@@ -323,7 +781,6 @@ function hasSequentialPattern(str: string, minLength: number = 4): boolean {
 
 /**
  * Calculates password strength metrics across 4 levels: Weak, Medium, Strong, Very Strong.
- * Evaluates length, character variety, common password presence, and sequential/repetitive patterns.
  */
 export function getPasswordStrength(password: string): PasswordStrength {
   if (!password) {
@@ -342,7 +799,6 @@ export function getPasswordStrength(password: string): PasswordStrength {
 
   const lower = password.toLowerCase();
 
-  // Common password checks
   if (COMMON_PASSWORDS.has(lower)) {
     return {
       score: 'weak',
@@ -352,7 +808,6 @@ export function getPasswordStrength(password: string): PasswordStrength {
     };
   }
 
-  // Common substring checks (e.g. "mysecretpassword123")
   const containsCommonWord = ['password', 'admin', 'qwerty', '123456', 'welcome', 'letmein'].some(
     (w) => lower.includes(w)
   );
@@ -363,10 +818,9 @@ export function getPasswordStrength(password: string): PasswordStrength {
   const hasSymbol = /[^A-Za-z0-9]/.test(password);
   const varietyCount = [hasLower, hasUpper, hasDigit, hasSymbol].filter(Boolean).length;
 
-  const hasRepeated = /(.)\1{2,}/.test(password); // e.g. "aaa", "111"
+  const hasRepeated = /(.)\1{2,}/.test(password);
   const isSequential = hasSequentialPattern(password, 4);
 
-  // If containing very common words and under 16 characters -> Weak or Medium
   if (containsCommonWord && length < 16) {
     return {
       score: 'weak',
@@ -376,32 +830,22 @@ export function getPasswordStrength(password: string): PasswordStrength {
     };
   }
 
-  // Scoring algorithm (0 to 100)
   let points = 0;
-
-  // Length contributions
   if (length >= 8 && length < 12) points += 25;
   else if (length >= 12 && length < 16) points += 45;
   else if (length >= 16 && length < 20) points += 65;
   else if (length >= 20) points += 80;
 
-  // Variety contributions
-  points += varietyCount * 6; // up to 24 points
-
-  // Variety bonus if all 4 categories are present
+  points += varietyCount * 6;
   if (varietyCount === 4) points += 10;
 
-  // Penalties
   if (varietyCount === 1) points -= 25;
   if (hasRepeated) points -= 15;
   if (isSequential) points -= 15;
   if (containsCommonWord) points -= 20;
 
-  // Minimum and Maximum clamping
   points = Math.max(15, Math.min(100, points));
 
-  // Determine Level: Weak, Medium, Strong, Very Strong
-  // Very Strong strictly requires length >= 20, all 4 character classes, and no common/repetitive patterns.
   if (length >= 20 && varietyCount === 4 && !hasRepeated && !isSequential && !containsCommonWord) {
     return {
       score: 'very-strong',
@@ -435,9 +879,6 @@ export function getPasswordStrength(password: string): PasswordStrength {
 
 /**
  * Generates an automatic cryptographically secure random password of specified length (min 20, default 24).
- * Uses window.crypto.getRandomValues() with rejection sampling to eliminate modulo bias.
- * Ensures uppercase letters, lowercase letters, numbers, and special characters are included.
- * Never uses dictionary words, names, dates, or predictable patterns.
  */
 export function generateSecurePassword(length: number = 24): string {
   const targetLength = Math.max(20, length);
@@ -454,7 +895,6 @@ export function generateSecurePassword(length: number = 24): string {
     throw new Error('Cryptographically secure random number generator (crypto.getRandomValues) is not available.');
   }
 
-  // Cryptographically secure random integer in [0, max) using rejection sampling
   function getSecureRandomInt(max: number): number {
     const limit = Math.floor(0xffffffff / max) * max;
     const array = new Uint32Array(1);
@@ -466,7 +906,6 @@ export function generateSecurePassword(length: number = 24): string {
     }
   }
 
-  // Guarantee presence of character sets: at least 2 of each category
   const chars: string[] = [
     uppercase[getSecureRandomInt(uppercase.length)],
     uppercase[getSecureRandomInt(uppercase.length)],
@@ -478,12 +917,10 @@ export function generateSecurePassword(length: number = 24): string {
     symbols[getSecureRandomInt(symbols.length)],
   ];
 
-  // Fill remaining positions uniformly from combined character set
   while (chars.length < targetLength) {
     chars.push(allChars[getSecureRandomInt(allChars.length)]);
   }
 
-  // Cryptographic Fisher-Yates shuffle
   for (let i = chars.length - 1; i > 0; i--) {
     const j = getSecureRandomInt(i + 1);
     const temp = chars[i];

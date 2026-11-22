@@ -12,6 +12,9 @@ import {
   RefreshCw,
   Lock,
   ImageIcon,
+  Cpu,
+  Shuffle,
+  Key,
 } from 'lucide-react';
 import {
   decryptEVC,
@@ -19,7 +22,7 @@ import {
   formatBytes,
   type DecryptionResult,
   type EVCMetadata,
-} from '../utils/crypto';
+} from '../utils/crypto.ts';
 
 interface EVCFileDetails {
   file: File;
@@ -34,8 +37,15 @@ export const DecryptPage: React.FC = () => {
 
   // State
   const [evcDetails, setEvcDetails] = useState<EVCFileDetails | null>(null);
+
+  // Symmetric / Pixel Shuffle Credential
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
+
+  // Asymmetric RSA Credential
+  const [privateKeyPEM, setPrivateKeyPEM] = useState('');
+  const [privateKeyPassphrase, setPrivateKeyPassphrase] = useState('');
+  const [showPrivPassphrase, setShowPrivPassphrase] = useState(false);
 
   // Status & Results
   const [isDecrypting, setIsDecrypting] = useState(false);
@@ -44,6 +54,21 @@ export const DecryptPage: React.FC = () => {
   const [decryptedDimensions, setDecryptedDimensions] = useState<{ width: number; height: number } | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const privKeyFileInputRef = useRef<HTMLInputElement>(null);
+
+  // Detect method & encryption type from metadata
+  const isAsymmetric = evcDetails?.metadata?.encryptionType === 'asymmetric';
+  const isPixelShuffle = evcDetails?.metadata?.method === 'pixel-shuffle';
+  const detectedAlgorithm = isAsymmetric
+    ? `RSA-OAEP-${evcDetails?.metadata?.keySize || 2048} Hybrid + AES-GCM`
+    : isPixelShuffle
+    ? `Pixel Shuffle + AES-${evcDetails?.metadata?.keySize || 256}-GCM`
+    : `AES-${evcDetails?.metadata?.keySize || 256}-GCM`;
+
+  // Validation
+  const isCredentialProvided = isAsymmetric
+    ? privateKeyPEM.trim().length > 0 && privateKeyPassphrase.length > 0
+    : password.length > 0;
 
   // File handling
   const handleFileSelect = async (file: File) => {
@@ -83,10 +108,6 @@ export const DecryptPage: React.FC = () => {
     }
   };
 
-  const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
-    e.preventDefault();
-  };
-
   const handleRemoveFile = () => {
     if (decryptionResult?.objectUrl) {
       URL.revokeObjectURL(decryptionResult.objectUrl);
@@ -96,17 +117,24 @@ export const DecryptPage: React.FC = () => {
     setErrorMessage(null);
     setDecryptedDimensions(null);
     setPassword('');
+    setPrivateKeyPEM('');
+    setPrivateKeyPassphrase('');
     if (fileInputRef.current) fileInputRef.current.value = '';
+    if (privKeyFileInputRef.current) privKeyFileInputRef.current.value = '';
   };
 
   const handleDecrypt = async () => {
-    if (!evcDetails || !password || isDecrypting) return;
+    if (!evcDetails || !isCredentialProvided || isDecrypting) return;
 
     setIsDecrypting(true);
     setErrorMessage(null);
 
     try {
-      const result = await decryptEVC(evcDetails.buffer, password);
+      const result = await decryptEVC(
+        evcDetails.buffer,
+        isAsymmetric ? privateKeyPEM : password,
+        isAsymmetric ? privateKeyPassphrase : undefined
+      );
 
       // Load image dimensions
       const img = new Image();
@@ -148,7 +176,7 @@ export const DecryptPage: React.FC = () => {
           Decrypt <span className="bg-gradient-to-r from-purple-400 to-indigo-400 bg-clip-text text-transparent">EVC File</span>
         </h1>
         <p className="text-slate-400 max-w-lg mx-auto text-sm sm:text-base">
-          Upload an encrypted .EVC container and enter the secret key to authenticate and reconstruct the original image.
+          Upload an encrypted .EVC container to authenticate, decrypt, and recover the original image.
         </p>
       </div>
 
@@ -158,9 +186,9 @@ export const DecryptPage: React.FC = () => {
           <div className="text-xs font-bold uppercase tracking-wider">STEP 01</div>
           <div className="text-sm font-semibold text-white">Upload .EVC</div>
         </div>
-        <div className={`p-3 rounded-xl border ${password ? 'bg-indigo-950/40 border-indigo-500/40 text-indigo-300' : 'glass-card text-slate-400'}`}>
+        <div className={`p-3 rounded-xl border ${isCredentialProvided ? 'bg-indigo-950/40 border-indigo-500/40 text-indigo-300' : 'glass-card text-slate-400'}`}>
           <div className="text-xs font-bold uppercase tracking-wider">STEP 02</div>
-          <div className="text-sm font-semibold text-white">Enter Secret Key</div>
+          <div className="text-sm font-semibold text-white">Enter Credentials</div>
         </div>
         <div className={`p-3 rounded-xl border ${decryptionResult ? 'bg-emerald-950/40 border-emerald-500/40 text-emerald-300' : 'glass-card text-slate-400'}`}>
           <div className="text-xs font-bold uppercase tracking-wider">STEP 03</div>
@@ -168,7 +196,7 @@ export const DecryptPage: React.FC = () => {
         </div>
       </div>
 
-      {/* Error Alert Card (e.g. Wrong Password or Corrupted File) */}
+      {/* Error Alert Card */}
       {errorMessage && (
         <div className="glass-card p-6 rounded-2xl border-rose-500/40 bg-rose-950/30 text-rose-200 space-y-3 animate-fadeIn">
           <div className="flex items-center space-x-3 text-rose-400">
@@ -196,7 +224,7 @@ export const DecryptPage: React.FC = () => {
             {!evcDetails ? (
               <div
                 onDrop={handleDrop}
-                onDragOver={handleDragOver}
+                onDragOver={(e) => e.preventDefault()}
                 onClick={() => fileInputRef.current?.click()}
                 className="border-2 border-dashed border-purple-500/30 hover:border-purple-400/70 bg-slate-950/40 hover:bg-slate-900/60 rounded-2xl p-10 text-center cursor-pointer transition-all space-y-4 group"
               >
@@ -215,7 +243,7 @@ export const DecryptPage: React.FC = () => {
                   <p className="text-sm text-slate-400">or <span className="text-purple-400 font-semibold underline">click to browse</span></p>
                 </div>
                 <p className="text-xs text-slate-500 uppercase tracking-widest">
-                  Accepts only encrypted .evc container files
+                  Supports Standard AES (128/192/256), RSA Hybrid (2048/3072/4096), Pixel Shuffle & Legacy .evc
                 </p>
               </div>
             ) : (
@@ -223,17 +251,17 @@ export const DecryptPage: React.FC = () => {
                 <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
                   <div className="flex items-center space-x-4">
                     <div className="w-12 h-12 rounded-xl bg-purple-950 border border-purple-500/30 flex items-center justify-center text-purple-400">
-                      <FileLock2 className="w-6 h-6" />
+                      {isAsymmetric ? <Cpu className="w-6 h-6" /> : isPixelShuffle ? <Shuffle className="w-6 h-6" /> : <FileLock2 className="w-6 h-6" />}
                     </div>
                     <div>
                       <h3 className="font-bold text-white text-base">{evcDetails.file.name}</h3>
-                      <div className="flex items-center space-x-3 text-xs text-slate-400 mt-1">
+                      <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400 mt-1">
                         <span>Size: <strong className="text-slate-200">{formatBytes(evcDetails.file.size)}</strong></span>
-                        {evcDetails.metadata && (
-                          <span>Original: <strong className="text-blue-400">{evcDetails.metadata.originalName}</strong></span>
-                        )}
+                        <span>•</span>
+                        <span>Detected: <strong className="text-cyan-300 font-semibold">{detectedAlgorithm}</strong></span>
+                        <span>•</span>
                         <span className={evcDetails.headerValid ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'}>
-                          {evcDetails.headerValid ? '● Valid EVC Header' : '● Header Error'}
+                          {evcDetails.headerValid ? '● Valid Container' : '● Header Error'}
                         </span>
                       </div>
                     </div>
@@ -251,48 +279,131 @@ export const DecryptPage: React.FC = () => {
             )}
           </section>
 
-          {/* STEP 02 — SECRET KEY */}
-          <section className="glass-card p-6 sm:p-8 rounded-3xl space-y-6">
-            <div className="flex items-center space-x-3">
-              <div className="w-8 h-8 rounded-lg bg-indigo-600/30 text-indigo-400 border border-indigo-500/40 flex items-center justify-center font-bold text-sm">
-                02
+          {/* STEP 02 — CREDENTIALS INPUT */}
+          {evcDetails && (
+            <section className="glass-card p-6 sm:p-8 rounded-3xl space-y-6">
+              <div className="flex items-center space-x-3">
+                <div className="w-8 h-8 rounded-lg bg-indigo-600/30 text-indigo-400 border border-indigo-500/40 flex items-center justify-center font-bold text-sm">
+                  02
+                </div>
+                <div>
+                  <h2 className="text-xl font-bold text-white">
+                    {isAsymmetric ? 'Enter Recipient Private Key' : 'Enter Secret Key'}
+                  </h2>
+                  <p className="text-xs text-slate-400">
+                    {isAsymmetric
+                      ? 'Provide your protected RSA private key and passphrase to unlock the ephemeral AES key.'
+                      : isPixelShuffle
+                      ? 'Provide the secret key used to protect the container and invert the pixel permutation.'
+                      : 'Provide the secret passphrase used to derive the AES decryption key.'}
+                  </p>
+                </div>
               </div>
-              <h2 className="text-xl font-bold text-white">Enter Secret Key</h2>
-            </div>
 
-            <div className="space-y-2 max-w-lg">
-              <label className="block text-xs font-bold text-slate-300 uppercase tracking-wider">
-                Secret Passphrase
-              </label>
-              <div className="relative">
-                <input
-                  type={showPassword ? 'text' : 'password'}
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="Enter the key used during encryption"
-                  className="w-full px-4 py-3 rounded-xl glass-input pr-10 text-sm"
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowPassword(!showPassword)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
-                >
-                  {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                </button>
-              </div>
-              <p className="text-xs text-slate-500">
-                The password is derived locally via PBKDF2 to reconstruct the AES-GCM decryption key.
-              </p>
-            </div>
-          </section>
+              {/* ASYMMETRIC RSA CREDENTIALS */}
+              {isAsymmetric ? (
+                <div className="space-y-4">
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <label className="block text-xs font-bold text-slate-300 uppercase tracking-wider">
+                        Protected RSA Private Key (PEM format)
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => privKeyFileInputRef.current?.click()}
+                        className="text-xs text-blue-400 hover:underline flex items-center space-x-1"
+                      >
+                        <Key className="w-3.5 h-3.5" />
+                        <span>Upload .pem private key file</span>
+                      </button>
+                      <input
+                        type="file"
+                        ref={privKeyFileInputRef}
+                        accept=".pem,.key,.txt"
+                        className="hidden"
+                        onChange={async (e) => {
+                          const f = e.target.files?.[0];
+                          if (f) {
+                            const text = await f.text();
+                            setPrivateKeyPEM(text);
+                          }
+                        }}
+                      />
+                    </div>
+                    <textarea
+                      rows={5}
+                      value={privateKeyPEM}
+                      onChange={(e) => setPrivateKeyPEM(e.target.value)}
+                      placeholder="-----BEGIN ENCRYPTED PRIVATE KEY-----&#10;...&#10;-----END ENCRYPTED PRIVATE KEY-----"
+                      className="w-full p-3 rounded-xl glass-input text-xs font-mono"
+                    />
+                  </div>
+
+                  <div className="space-y-1.5 max-w-lg">
+                    <label className="block text-xs font-bold text-slate-300 uppercase tracking-wider">
+                      Private Key Unlock Passphrase
+                    </label>
+                    <div className="relative">
+                      <input
+                        type={showPrivPassphrase ? 'text' : 'password'}
+                        value={privateKeyPassphrase}
+                        onChange={(e) => setPrivateKeyPassphrase(e.target.value)}
+                        placeholder="Enter the passphrase protecting this private key"
+                        className="w-full px-4 py-2.5 rounded-xl glass-input pr-10 text-sm font-mono"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowPrivPassphrase(!showPrivPassphrase)}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
+                      >
+                        {showPrivPassphrase ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      </button>
+                    </div>
+                    <p className="text-[11px] text-slate-500">
+                      Unprotected private keys are never accepted. Passphrase unlocks your private key locally in browser memory.
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                /* SYMMETRIC / PIXEL SHUFFLE PASSPHRASE */
+                <div className="space-y-2 max-w-lg">
+                  <label className="block text-xs font-bold text-slate-300 uppercase tracking-wider">
+                    Secret Passphrase
+                  </label>
+                  <div className="relative">
+                    <input
+                      type={showPassword ? 'text' : 'password'}
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      placeholder="Enter the secret key used during encryption"
+                      className="w-full px-4 py-3 rounded-xl glass-input pr-10 text-sm font-mono"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword(!showPassword)}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
+                    >
+                      {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
+                  {isPixelShuffle && (
+                    <div className="flex items-center space-x-1.5 text-xs text-purple-300 pt-1">
+                      <Shuffle className="w-3.5 h-3.5" />
+                      <span>Pixel Shuffle Container: The secret key will decrypt AES payload and reverse the pixel permutation.</span>
+                    </div>
+                  )}
+                </div>
+              )}
+            </section>
+          )}
 
           {/* STEP 03 — DECRYPT BUTTON */}
           <div className="pt-2">
             <button
               onClick={handleDecrypt}
-              disabled={!evcDetails || !password || isDecrypting}
+              disabled={!evcDetails || !isCredentialProvided || isDecrypting}
               className={`w-full py-4 rounded-2xl font-bold text-lg shadow-xl transition-all flex items-center justify-center space-x-3 ${
-                !evcDetails || !password || isDecrypting
+                !evcDetails || !isCredentialProvided || isDecrypting
                   ? 'bg-slate-800/60 text-slate-500 cursor-not-allowed border border-slate-700/40'
                   : 'bg-gradient-to-r from-purple-600 via-indigo-600 to-blue-600 text-white hover:shadow-purple-500/30 hover:scale-[1.01] active:scale-[0.99]'
               }`}
@@ -321,7 +432,9 @@ export const DecryptPage: React.FC = () => {
             </div>
             <h2 className="text-2xl font-bold text-white">✓ Image Successfully Decrypted</h2>
             <p className="text-sm text-slate-400 max-w-md mx-auto">
-              AES-GCM authentication tag verified. The original visual payload has been restored cleanly.
+              {isPixelShuffle
+                ? 'AES-GCM authentication verified and inverse pixel permutation restored cleanly.'
+                : 'Authentication tag verified and original image restored bit-exact.'}
             </p>
           </div>
 
@@ -346,8 +459,8 @@ export const DecryptPage: React.FC = () => {
               </span>
             </div>
             <div>
-              <span className="text-slate-500 text-xs block uppercase font-bold">File Type</span>
-              <span className="text-blue-300 font-semibold">{decryptionResult.mimeType}</span>
+              <span className="text-slate-500 text-xs block uppercase font-bold">Algorithm</span>
+              <span className="text-purple-300 font-semibold">{detectedAlgorithm}</span>
             </div>
             <div>
               <span className="text-slate-500 text-xs block uppercase font-bold">File Size</span>
